@@ -1,5 +1,4 @@
-use std::{path::Path, sync::OnceLock};
-use cargo_metadata::MetadataCommand;
+use std::{fs::read_to_string, io::{Error, ErrorKind}, path::Path, process::Command, sync::OnceLock};
 
 pub(crate) static FORCE_MAKEPAD: OnceLock<bool> = OnceLock::new();
 pub(crate) static IS_MAKEPAD_APP: OnceLock<bool> = OnceLock::new();
@@ -36,22 +35,27 @@ pub(crate) fn makepad_package_dir_value(package_format: &str, main_binary_name: 
 /// Returns whether the package being built is a makepad app, i.e., it depends on `makepad-widgets`.
 pub(crate) fn is_makepad_app() -> bool {
     *IS_MAKEPAD_APP.get_or_init(|| {
-        MetadataCommand::new()
-            .exec()
-            .ok()
-            .map(|cargo_metadata| cargo_metadata
-                .packages
-                .iter()
-                .any(|package| package.name == "makepad-widgets")
-            )
-            .unwrap_or(false)
+        // First ensure the project is compiled to generate .path files
+        if let Ok(output) = Command::new("cargo")
+            .args(&["check", "--quiet"])
+            .output()
+        {
+            if output.status.success() {
+                // Check if makepad-widgets.path exists in target/debug/
+                Path::new("target/debug/makepad-widgets.path").exists()
+            } else {
+                false
+            }
+        } else {
+            false
+        }
     })
 }
 
 
 /// Recursively copies the Makepad-specific resource files.
 ///
-/// This uses `cargo-metadata` to determine the location of the `makepad-widgets` crate,
+/// This reads the makepad-widgets path from `target/debug/makepad-widgets.path` file,
 /// and then copies the `resources` directory from that crate to a makepad-specific subdirectory
 /// of the given `dist_resources_dir` path, which is currently `./dist/resources/makepad_widgets/`.
 pub(crate) fn copy_makepad_resources<P>(dist_resources_dir: P) -> std::io::Result<()>
@@ -62,33 +66,41 @@ where
         .join("makepad_widgets")
         .join("resources");
     let makepad_widgets_resources_src = {
-        let cargo_metadata = MetadataCommand::new()
-            .exec()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let path_file = Path::new("target/debug/makepad-widgets.path");
+        if !path_file.exists() {
+            // Try to run cargo check to generate the .path file
+            if let Ok(output) = Command::new("cargo")
+                .args(&["check", "--quiet"])
+                .output()
+            {
+                if !output.status.success() || !path_file.exists() {
+                    let _ = IS_MAKEPAD_APP.set(false);
+                    return Err(Error::new(
+                        ErrorKind::NotFound,
+                        "makepad-widgets.path file not found even after running cargo check. This project is not makepad app"
+                    ));
+                }
+            } else {
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    "Failed to run cargo check to generate makepad-widgets.path file."
+                ));
+            }
+        }
 
-        let makepad_widgets_package_res = cargo_metadata
-            .packages
-            .iter()
-            .find(|package| package.name == "makepad-widgets")
-            .ok_or_else(|| std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "makepad-widgets package not found"
-            ));
+        println!("Makepad App: {}", true);
+        let _ = IS_MAKEPAD_APP.set(true);
 
-        let _ = IS_MAKEPAD_APP.set(makepad_widgets_package_res.is_ok());
+        let makepad_widgets_path = read_to_string(path_file)?
+            .trim()
+            .to_string();
 
-        makepad_widgets_package_res?
-            .manifest_path
-            .parent()
-            .ok_or_else(|| std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "makepad-widgets package manifest path not found"),
-            )?
+        Path::new(&makepad_widgets_path)
             .join("resources")
     };
 
     println!("Copying makepad-widgets resources...\n  --> From: {}\n      to:   {}",
-        makepad_widgets_resources_src.as_std_path().display(),
+        makepad_widgets_resources_src.display(),
         makepad_widgets_resources_dest.display(),
     );
     super::copy_recursively(&makepad_widgets_resources_src, &makepad_widgets_resources_dest)?;

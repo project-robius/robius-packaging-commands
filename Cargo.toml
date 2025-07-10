@@ -18,7 +18,3 @@ readme = "README.md"
 keywords = [ "robius", "app", "bundle", "package", "makepad" ]
 documentation = "https://docs.rs/robius-packaging-commands"
 homepage = "https://robius.rs/"
-
-
-[dependencies]
-cargo_metadata = "0.18"
