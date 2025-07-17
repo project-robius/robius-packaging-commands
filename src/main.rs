@@ -107,8 +107,7 @@ fn main() -> std::io::Result<()> {
 ///
 /// ## Functionality
 /// 1. Creates a directory for the resources to be packaged, which is currently `./dist/resources/`.
-/// 2. If a makepad app is being built, locates and copies in makepad-specific resource files.
-/// 3. Recursively copies the app-specific `./resources` directory to `./dist/resources/<main-binary-name>/`.
+/// 2. Recursively copies the app-specific `./resources` directory to `./dist/resources/<main-binary-name>/`.
 fn before_packaging(_host_os: &str, main_binary_name: &str) -> std::io::Result<()> {
     let cwd = std::env::current_dir()?;
     let dist_resources_dir = cwd.join("dist").join("resources");
@@ -147,25 +146,15 @@ fn before_each_package<P: AsRef<Path>>(
     main_binary_name: &str,
     path_to_binary: P,
 ) -> std::io::Result<()> {
-    let cwd = std::env::current_dir()?;
-    let dist_resources_dir = cwd.join("dist").join("resources");
-    fs::create_dir_all(&dist_resources_dir)?;
-
-    {
-        let app_resources_dest = dist_resources_dir.join(main_binary_name).join("resources");
-        let app_resources_src = cwd.join("resources");
-        println!("Copying app-specific resources...\n  --> From: {}\n      to:   {}", app_resources_src.display(), app_resources_dest.display());
-        copy_recursively(&app_resources_src, &app_resources_dest)?;
-        println!("  --> Done!");
-    }
-
     // The `CARGO_PACKAGER_FORMAT` environment variable is required.
     let format = std::env::var("CARGO_PACKAGER_FORMAT")
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
     let package_format = format.as_str();
     println!("Running before-each-package-command for {package_format:?}");
-    let _ = match package_format         {
+
+    // First run compilation - only copy resources if compilation succeeds
+    let compilation_result = match package_format {
         "app" | "dmg" => before_each_package_macos(   package_format, host_os, &main_binary_name, &path_to_binary),
         "deb"         => before_each_package_deb(     package_format, host_os, &main_binary_name, &path_to_binary),
         "appimage"    => before_each_package_appimage(package_format, host_os, &main_binary_name, &path_to_binary),
@@ -176,8 +165,33 @@ fn before_each_package<P: AsRef<Path>>(
             format!("Unknown/unsupported package format {_other:?}"),
         )),
     };
-    copy_makepad_resources(&dist_resources_dir)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+
+    // Only proceed with resource copying if compilation succeeded
+    compilation_result?;
+
+    let cwd = std::env::current_dir()?;
+    let dist_resources_dir = cwd.join("dist").join("resources");
+
+    // Clear/delete existing resources directory to ensure no stale files
+    if dist_resources_dir.exists() {
+        fs::remove_dir_all(&dist_resources_dir)?;
+    }
+    fs::create_dir_all(&dist_resources_dir)?;
+
+    {
+        let app_resources_dest = dist_resources_dir.join(main_binary_name).join("resources");
+        let app_resources_src = cwd.join("resources");
+        println!("Copying app-specific resources...\n  --> From: {}\n      to:   {}", app_resources_src.display(), app_resources_dest.display());
+        copy_recursively(&app_resources_src, &app_resources_dest)?;
+        println!("  --> Done!");
+    }
+
+    // If this is a Makepad app, copy Makepad-specific resources
+    if is_makepad_app() {
+        copy_makepad_resources(&dist_resources_dir)?;
+    }
+    println!("All resources copied successfully to: {}", dist_resources_dir.display());
+    Ok(())
 }
 
 

@@ -87,11 +87,10 @@ where
 {
     let makepad_resources_paths = get_makepad_resources_paths();
     if makepad_resources_paths.is_empty() {
-        // The user did not add the makepad-widgets dependency, but forced the --force-makepad flag.
-        println!("No Makepad resources found. Skipping copy.");
-        return Ok(());
+        // This situation can happen if the user use local Makepad repository and deletes the all `makepad-*.path` files.
+        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No Makepad resources found"));
     }
-
+    println!("Copying Makepad resources...");
     for (resources_dir_name, resources_dir_path) in makepad_resources_paths {
         let source_path = resources_dir_path.join("resources");
 
@@ -100,9 +99,9 @@ where
             .join("resources");
 
         if source_path.exists() {
+            println!("--> From: {}\n      to:   {}", source_path.display(), makepad_widgets_resources_dest.display());
             super::copy_recursively(&source_path, &makepad_widgets_resources_dest)?;
         }
     }
-    println!("  --> Done!");
     Ok(())
 }
