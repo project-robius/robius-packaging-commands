@@ -105,19 +105,9 @@ fn main() -> std::io::Result<()> {
 
 /// This function is run only *once* before cargo-packager generates any package bundles.
 ///
-/// ## Functionality
-/// 1. Creates a directory for the resources to be packaged, which is currently `./dist/resources/`.
-/// 2. Recursively copies the app-specific `./resources` directory to `./dist/resources/<main-binary-name>/`.
-fn before_packaging(_host_os: &str, main_binary_name: &str) -> std::io::Result<()> {
-    let cwd = std::env::current_dir()?;
-    let dist_resources_dir = cwd.join("dist").join("resources");
-    fs::create_dir_all(&dist_resources_dir)?;
-    
-    let app_resources_dest = dist_resources_dir.join(main_binary_name).join("resources");
-    let app_resources_src = cwd.join("resources");
-    println!("Copying app-specific resources...\n  --> From: {}\n      to:   {}", app_resources_src.display(), app_resources_dest.display());
-    copy_recursively(&app_resources_src, &app_resources_dest)?;
-    println!("  --> Done!");
+/// In fact, the current Makepad project doesn't need to use this function,
+/// and we've kept all the infrastructure for the before-packaging command (in case we ever need it in the future).
+fn before_packaging(_host_os: &str, _main_binary_name: &str) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -154,20 +144,17 @@ fn before_each_package<P: AsRef<Path>>(
     println!("Running before-each-package-command for {package_format:?}");
 
     // First run compilation - only copy resources if compilation succeeds
-    let compilation_result = match package_format {
-        "app" | "dmg" => before_each_package_macos(   package_format, host_os, &main_binary_name, &path_to_binary),
-        "deb"         => before_each_package_deb(     package_format, host_os, &main_binary_name, &path_to_binary),
-        "appimage"    => before_each_package_appimage(package_format, host_os, &main_binary_name, &path_to_binary),
-        "pacman"      => before_each_package_pacman(  package_format, host_os, &main_binary_name, &path_to_binary),
-        "nsis"        => before_each_package_windows( package_format, host_os, &main_binary_name, &path_to_binary),
+    match package_format {
+        "app" | "dmg" => before_each_package_macos(   package_format, host_os, &main_binary_name, &path_to_binary)?,
+        "deb"         => before_each_package_deb(     package_format, host_os, &main_binary_name, &path_to_binary)?,
+        "appimage"    => before_each_package_appimage(package_format, host_os, &main_binary_name, &path_to_binary)?,
+        "pacman"      => before_each_package_pacman(  package_format, host_os, &main_binary_name, &path_to_binary)?,
+        "nsis"        => before_each_package_windows( package_format, host_os, &main_binary_name, &path_to_binary)?,
         _other => return Err(std::io::Error::new(
             std::io::ErrorKind::Other,
             format!("Unknown/unsupported package format {_other:?}"),
         )),
     };
-
-    // Only proceed with resource copying if compilation succeeded
-    compilation_result?;
 
     let cwd = std::env::current_dir()?;
     let dist_resources_dir = cwd.join("dist").join("resources");
@@ -183,18 +170,18 @@ fn before_each_package<P: AsRef<Path>>(
         let app_resources_src = cwd.join("resources");
         println!("Copying app-specific resources...\n  --> From: {}\n      to:   {}", app_resources_src.display(), app_resources_dest.display());
         copy_recursively(&app_resources_src, &app_resources_dest)?;
-        println!("  --> Done!");
     }
 
     // If this is a Makepad app, copy Makepad-specific resources
     let should_copy_makepad_resources = match FORCE_MAKEPAD.get() {
-        Some(forced) => forced,
+        Some(forced) => *forced,
         None => is_makepad_app(),
     };
     if should_copy_makepad_resources {
         copy_makepad_resources(&dist_resources_dir)?;
     }
     println!("All resources copied successfully to: {}", dist_resources_dir.display());
+    println!("  --> Done!");
     Ok(())
 }
 
