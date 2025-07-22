@@ -187,7 +187,11 @@ fn before_each_package<P: AsRef<Path>>(
     }
 
     // If this is a Makepad app, copy Makepad-specific resources
-    if is_makepad_app() {
+    let should_copy_makepad_resources = match FORCE_MAKEPAD.get() {
+        Some(forced) => forced,
+        None => is_makepad_app(),
+    };
+    if should_copy_makepad_resources {
         copy_makepad_resources(&dist_resources_dir)?;
     }
     println!("All resources copied successfully to: {}", dist_resources_dir.display());
