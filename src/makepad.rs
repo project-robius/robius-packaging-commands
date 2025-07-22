@@ -88,7 +88,10 @@ where
     let makepad_resources_paths = get_makepad_resources_paths();
     if makepad_resources_paths.is_empty() {
         // This situation can happen if the user use local Makepad repository and deletes the all `makepad-*.path` files.
-        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No Makepad resources found"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Missing resource paths: no `.path` files found in the Makepad build directory (./target/release/)",
+        ));
     }
     println!("Copying Makepad resources...");
     for (resources_dir_name, resources_dir_path) in makepad_resources_paths {
