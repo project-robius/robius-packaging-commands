@@ -11,15 +11,24 @@ See the example below:
 [package.metadata.packager]
 product_name = "Robrix"
 
+[package.metadata.packager.macos]
+## You can use `-` as the value for `signing_identity`,
+## if you just want to test the packaging on macOS without signing the app.
+signature_identity = "-"
 ...
 
 ## This runs just one time before packaging starts; thus, it is used
 ## mostly just to handle resources and target-agnostic stuff.
-before-packaging-command = """
-robius-packaging-commands before-packaging \
-    --binary-name robrix \
-    --path-to-binary ./target/release/robrix
-"""
+##
+## Note: if your project is a Makepad app, you don't need to specify this, because
+## before-each-package-command will automatically copy the app's resources
+## to the target directory, so you can just use that command for other you want to do
+## before packaging.
+# before-packaging-command = """
+# robius-packaging-commands before-packaging \
+#     --binary-name robrix \
+#     --path-to-binary ./target/release/robrix
+# """
 
 ...
 
@@ -30,6 +39,17 @@ robius-packaging-commands before-each-package \
     --binary-name robrix \
     --path-to-binary ./target/release/robrix
 """
+
+## Note: for now, if you are using Makepad apps, you need to add some additional configuration to your `Cargo.toml` file.
+resources = [
+    { src = "./dist/resources/makepad_widgets", target = "makepad_widgets" },
+    { src = "./dist/resources/makepad_fonts_chinese_bold", target = "makepad_fonts_chinese_bold" },
+    { src = "./dist/resources/makepad_fonts_chinese_bold_2", target = "makepad_fonts_chinese_bold_2" },
+    { src = "./dist/resources/makepad_fonts_chinese_regular", target = "makepad_fonts_chinese_regular" },
+    { src = "./dist/resources/makepad_fonts_chinese_regular_2", target = "makepad_fonts_chinese_regular_2" },
+    { src = "./dist/resources/makepad_fonts_emoji", target = "makepad_fonts_emoji" },
+    { src = "./dist/resources/robrix", target = "robrix" },
+]
 ```
 
 Once you have this package metadata fully completed in your app crate's `Cargo.toml`,

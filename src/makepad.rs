@@ -1,4 +1,5 @@
-use std::{path::Path, sync::OnceLock};
+use std::{collections::HashMap, fs, path::{Path, PathBuf}, sync::OnceLock};
+
 use cargo_metadata::MetadataCommand;
 
 pub(crate) static FORCE_MAKEPAD: OnceLock<bool> = OnceLock::new();
@@ -48,6 +49,32 @@ pub(crate) fn is_makepad_app() -> bool {
     })
 }
 
+pub(crate) fn get_makepad_resources_paths() -> HashMap<String, PathBuf> {
+    let paths_dir = PathBuf::from("target/release/");
+    fs::read_dir(&paths_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+
+            if !path.is_file() {
+                return None;
+            }
+
+            let filename = path.file_name()?.to_str()?;
+
+            let package_name = filename
+                .strip_prefix("makepad-")?
+                .strip_suffix(".path")?;
+
+            let content = fs::read_to_string(&path).ok()?;
+            let resources_dir_path = PathBuf::from(content.trim());
+            let resources_dir_name = format!("makepad_{}", package_name.replace('-', "_"));
+            Some((resources_dir_name, resources_dir_path))
+        })
+        .collect()
+}
 
 /// Recursively copies the Makepad-specific resource files.
 ///
@@ -58,40 +85,26 @@ pub(crate) fn copy_makepad_resources<P>(dist_resources_dir: P) -> std::io::Resul
 where
     P: AsRef<Path>
 {
-    let makepad_widgets_resources_dest = dist_resources_dir.as_ref()
-        .join("makepad_widgets")
-        .join("resources");
-    let makepad_widgets_resources_src = {
-        let cargo_metadata = MetadataCommand::new()
-            .exec()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let makepad_resources_paths = get_makepad_resources_paths();
+    if makepad_resources_paths.is_empty() {
+        // This situation can happen if the user use local Makepad repository and deletes the all `makepad-*.path` files.
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Missing resource paths: no `.path` files found in the Makepad build directory (./target/release/)",
+        ));
+    }
+    println!("Copying Makepad resources...");
+    for (resources_dir_name, resources_dir_path) in makepad_resources_paths {
+        let source_path = resources_dir_path.join("resources");
 
-        let makepad_widgets_package_res = cargo_metadata
-            .packages
-            .iter()
-            .find(|package| package.name == "makepad-widgets")
-            .ok_or_else(|| std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "makepad-widgets package not found"
-            ));
+        let makepad_widgets_resources_dest = dist_resources_dir.as_ref()
+            .join(resources_dir_name)
+            .join("resources");
 
-        let _ = IS_MAKEPAD_APP.set(makepad_widgets_package_res.is_ok());
-
-        makepad_widgets_package_res?
-            .manifest_path
-            .parent()
-            .ok_or_else(|| std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "makepad-widgets package manifest path not found"),
-            )?
-            .join("resources")
-    };
-
-    println!("Copying makepad-widgets resources...\n  --> From: {}\n      to:   {}",
-        makepad_widgets_resources_src.as_std_path().display(),
-        makepad_widgets_resources_dest.display(),
-    );
-    super::copy_recursively(&makepad_widgets_resources_src, &makepad_widgets_resources_dest)?;
-    println!("  --> Done!");
+        if source_path.exists() {
+            println!("--> From: {}\n      to:   {}", source_path.display(), makepad_widgets_resources_dest.display());
+            super::copy_recursively(&source_path, &makepad_widgets_resources_dest)?;
+        }
+    }
     Ok(())
 }
