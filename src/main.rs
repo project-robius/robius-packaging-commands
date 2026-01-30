@@ -1,7 +1,8 @@
 //! This program should be invoked by `cargo-packager` during its before-packaging steps.
 //!
-//! This program must be run from the root of the project directory,
-//! which is also where the cargo-packager command must be invoked from.
+//! This program uses the current working directory as the app root
+//! (for ./resources and ./dist). The --path-to-binary argument is used
+//! to locate the target directory (useful in workspaces).
 //!
 //! ## Modes and CLI Arguments
 //! This program runs in two modes, one for each kind of before-packaging step in cargo-packager.
@@ -48,6 +49,19 @@ use std::{ffi::OsStr, fs, path::{Path, PathBuf}, process::{Command, Stdio}};
 
 const EMPTY_ARGS: std::iter::Empty<&str> = std::iter::empty::<&str>();
 const EMPTY_ENVS: std::iter::Empty<(&str, &str)> = std::iter::empty::<(&str, &str)>();
+
+
+fn resolve_target_dir(path_to_binary: &Path, cwd: &Path) -> PathBuf {
+    let abs_path = if path_to_binary.is_absolute() {
+        path_to_binary.to_path_buf()
+    } else {
+        cwd.join(path_to_binary)
+    };
+    abs_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| cwd.to_path_buf())
+}
 
 
 fn main() -> std::io::Result<()> {
@@ -157,6 +171,7 @@ fn before_each_package<P: AsRef<Path>>(
     };
 
     let cwd = std::env::current_dir()?;
+    let target_dir = resolve_target_dir(path_to_binary.as_ref(), &cwd);
     let dist_resources_dir = cwd.join("dist").join("resources");
 
     // Clear/delete existing resources directory to ensure no stale files
@@ -178,7 +193,7 @@ fn before_each_package<P: AsRef<Path>>(
         None => is_makepad_app(),
     };
     if should_copy_makepad_resources {
-        copy_makepad_resources(&dist_resources_dir)?;
+        copy_makepad_resources(&dist_resources_dir, &target_dir)?;
     }
     println!("All resources copied successfully to: {}", dist_resources_dir.display());
     println!("  --> Done!");
