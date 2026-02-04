@@ -6,8 +6,37 @@
 A multi-platform companion tool to help package your Rust app when using `cargo-packager`.
 
 ## Quick example of usage
+### Workspace example (app crate is not workspace root)
+In a workspace, you can run `cargo packager` from the app crate directory. The tool will use the
+current directory for `./resources` and `./dist`, and use `--path-to-binary` to locate the target dir.
+
+```toml
+[package.metadata.packager]
+product_name = "Robrix"
+out_dir = "./dist"
+
+before-each-package-command = """
+robius-packaging-commands before-each-package \
+    --binary-name robrix \
+    --path-to-binary ../../target/release/robrix
+"""
+
+resources = [
+    { src = "./dist/resources/makepad_widgets", target = "makepad_widgets" },
+    { src = "./dist/resources/makepad_fonts_chinese_bold", target = "makepad_fonts_chinese_bold" },
+    { src = "./dist/resources/makepad_fonts_chinese_bold_2", target = "makepad_fonts_chinese_bold_2" },
+    { src = "./dist/resources/makepad_fonts_chinese_regular", target = "makepad_fonts_chinese_regular" },
+    { src = "./dist/resources/makepad_fonts_chinese_regular_2", target = "makepad_fonts_chinese_regular_2" },
+    { src = "./dist/resources/makepad_fonts_emoji", target = "makepad_fonts_emoji" },
+    { src = "./dist/resources/robrix", target = "robrix" },
+]
+```
+
 This program should be invoked by `cargo-packager`'s "before-package" and "before-each-package" hooks,
 which you must specify in your `Cargo.toml` file under the `[package.metadata.packager]` section.
+
+It uses the current working directory as the app root for `./resources` and `./dist`,
+while `--path-to-binary` is used to locate the target directory (useful in workspaces).
 
 > [!IMPORTANT]
 > You *must* build in release mode (using `cargo packager --release`).
@@ -77,7 +106,7 @@ cargo +stable install --force --locked cargo-packager
 > [!IMPORTANT]
 > For Makepad apps using Makepad versions *before* v1.0, install `robius-packaging-commands` `--version 0.1`.
 >
-> For Makepad apps using Makepad versions *after* v1.0, install `robius-packaging-commands` `--version 0.2`.
+> For Makepad apps using Makepad versions *after* v1.0, install `robius-packaging-commands` `--version ^0.2`.
 
 ```sh
 # From crates.io
@@ -95,9 +124,9 @@ cargo packager --release ## --verbose is optional
 
 ## More info
 
-This program must be run from the root of the project directory,
-which is also where the `cargo-packager` command must be invoked from,
-so that shouldn't present any problems.
+This program no longer requires the workspace root as the working directory.
+It uses the current working directory for app resources (`./resources`) and build output (`./dist`),
+and uses `--path-to-binary` to locate the target directory (e.g., a workspace `target/release`).
 
 This program runs in two modes, one for each kind of before-packaging step in cargo-packager:
 1. `before-packaging`: specifies that the `before-packaging-command` is being run by cargo-packager, which gets executed only *once* before cargo-packager generates any package bundles.

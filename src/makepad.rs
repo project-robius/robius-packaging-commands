@@ -49,8 +49,8 @@ pub(crate) fn is_makepad_app() -> bool {
     })
 }
 
-pub(crate) fn get_makepad_resources_paths() -> HashMap<String, PathBuf> {
-    let paths_dir = PathBuf::from("target/release/");
+pub(crate) fn get_makepad_resources_paths(target_dir: &Path) -> HashMap<String, PathBuf> {
+    let paths_dir = target_dir.to_path_buf();
     fs::read_dir(&paths_dir)
         .into_iter()
         .flatten()
@@ -81,16 +81,16 @@ pub(crate) fn get_makepad_resources_paths() -> HashMap<String, PathBuf> {
 /// This uses `cargo-metadata` to determine the location of the `makepad-widgets` crate,
 /// and then copies the `resources` directory from that crate to a makepad-specific subdirectory
 /// of the given `dist_resources_dir` path, which is currently `./dist/resources/makepad_widgets/`.
-pub(crate) fn copy_makepad_resources<P>(dist_resources_dir: P) -> std::io::Result<()>
+pub(crate) fn copy_makepad_resources<P>(dist_resources_dir: P, target_dir: &Path) -> std::io::Result<()>
 where
     P: AsRef<Path>
 {
-    let makepad_resources_paths = get_makepad_resources_paths();
+    let makepad_resources_paths = get_makepad_resources_paths(target_dir);
     if makepad_resources_paths.is_empty() {
         // This situation can happen if the user use local Makepad repository and deletes the all `makepad-*.path` files.
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "Missing resource paths: no `.path` files found in the Makepad build directory (./target/release/)",
+            format!("Missing resource paths: no `.path` files found in the Makepad build directory ({})", target_dir.display()),
         ));
     }
     println!("Copying Makepad resources...");
