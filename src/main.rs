@@ -45,7 +45,7 @@ pub mod makepad;
 use makepad::*;
 
 use core::panic;
-use std::{ffi::OsStr, fs, path::{Path, PathBuf}, process::{Command, Stdio}};
+use std::{ffi::OsStr, fs, path::{Path, PathBuf}, process::Command};
 
 const EMPTY_ARGS: std::iter::Empty<&str> = std::iter::empty::<&str>();
 const EMPTY_ENVS: std::iter::Empty<(&str, &str)> = std::iter::empty::<(&str, &str)>();
@@ -70,6 +70,7 @@ fn main() -> std::io::Result<()> {
     let mut main_binary_name = None;
     let mut path_to_binary = None;
     let mut host_os_opt: Option<String> = None;
+    let mut extra_deb_deps: Vec<String> = Vec::new();
 
     let mut args = std::env::args().peekable();
     while let Some(arg) = args.next() {
@@ -85,6 +86,9 @@ fn main() -> std::io::Result<()> {
         else if arg == "--path-to-binary" {
             let path = PathBuf::from(args.next().expect("Expected a path after '--path-to-binary'."));
             path_to_binary = Some(path);
+        }
+        else if arg == "--add-deb-dep" {
+            extra_deb_deps.push(args.next().expect("Expected a package name after '--add-deb-dep'."));
         }
         else if arg == "--force-makepad" {
             FORCE_MAKEPAD.set(true)
@@ -111,7 +115,7 @@ fn main() -> std::io::Result<()> {
 
     match (is_before_packaging, is_before_each_package) {
         (true, false) => before_packaging(host_os, &main_binary_name),
-        (false, true) => before_each_package(host_os, &main_binary_name, &path_to_binary),
+        (false, true) => before_each_package(host_os, &main_binary_name, &path_to_binary, &extra_deb_deps),
         (true, true) => panic!("Cannot run both 'before-packaging' and 'before-each-package' commands at the same time."),
         (false, false) => panic!("Please specify either the 'before-packaging' or 'before-each-package' command."),
     }
@@ -149,6 +153,7 @@ fn before_each_package<P: AsRef<Path>>(
     host_os: &str,
     main_binary_name: &str,
     path_to_binary: P,
+    extra_deb_deps: &[String],
 ) -> std::io::Result<()> {
     // The `CARGO_PACKAGER_FORMAT` environment variable is required.
     let format = std::env::var("CARGO_PACKAGER_FORMAT")
@@ -160,7 +165,7 @@ fn before_each_package<P: AsRef<Path>>(
     // First run compilation - only copy resources if compilation succeeds
     match package_format {
         "app" | "dmg" => before_each_package_macos(   package_format, host_os, &main_binary_name, &path_to_binary)?,
-        "deb"         => before_each_package_deb(     package_format, host_os, &main_binary_name, &path_to_binary)?,
+        "deb"         => before_each_package_deb(     package_format, host_os, &main_binary_name, &path_to_binary, extra_deb_deps)?,
         "appimage"    => before_each_package_appimage(package_format, host_os, &main_binary_name, &path_to_binary)?,
         "pacman"      => before_each_package_pacman(  package_format, host_os, &main_binary_name, &path_to_binary)?,
         "nsis"        => before_each_package_windows( package_format, host_os, &main_binary_name, &path_to_binary)?,
@@ -273,21 +278,16 @@ fn before_each_package_appimage<P: AsRef<Path>>(
 }
 
 
-/// Runs the Linux-specific build commands for Debian `.deb` packages.
-///
-/// This function effectively runs the following shell commands:
-/// ```sh
-///    for path in $(ldd target/release/_moly_app | awk '{print $3}'); do \
-///        basename "$/path" ; \
-///    done \
-///    | xargs dpkg -S 2> /dev/null | awk '{print $1}' | awk -F ':' '{print $1}' | sort | uniq > ./dist/depends_deb.txt; \
-///    echo "curl" >> ./dist/depends_deb.txt; \
-///    
+/// Runs the Linux `.deb` build and writes the runtime dependency set to
+/// `./dist/depends_deb.txt`, computed with `dpkg-shlibdeps` (version-pinned,
+/// symbol-accurate). `extra_deb_deps` adds runtime deps the linker can't see,
+/// e.g. `xdg-utils`, passed via `--add-deb-dep`.
 fn before_each_package_deb<P: AsRef<Path>>(
     package_format: &str,
     host_os: &str,
     main_binary_name: &str,
     path_to_binary: P,
+    extra_deb_deps: &[String],
 ) -> std::io::Result<()> {
     assert!(host_os == "linux", "'deb' packages can only be created on Linux.");
 
@@ -300,61 +300,74 @@ fn before_each_package_deb<P: AsRef<Path>>(
     )?;
 
 
-    // Create Debian dependencies file by running `ldd` on the binary
-    // and then running `dpkg -S` on each unique shared libraries outputted by `ldd`.
-    let ldd_output = Command::new("ldd")
-        .arg(path_to_binary.as_ref())
-        .output()?;
+    let mut depends = compute_deb_depends_shlibdeps(main_binary_name, path_to_binary.as_ref())?;
 
-    let ldd_output = if ldd_output.status.success() {
-        String::from_utf8_lossy(&ldd_output.stdout)
-    } else {
-        eprintln!("Failed to run ldd command: {}
-            ------------------------- stderr: -------------------------
-            {:?}",
-            ldd_output.status,
-            String::from_utf8_lossy(&ldd_output.stderr),
-        );
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Failed to run ldd command on {host_os} for package format {package_format:?}")
-        ));
-    };
+    // Add runtime deps the linker can't see (things the app execs at runtime).
+    depends.extend(extra_deb_deps.iter().cloned());
+    depends.sort();
+    depends.dedup();
 
-    let mut dpkgs = Vec::new();
-    for line_raw in ldd_output.lines() {
-        let line = line_raw.trim();
-        let lib_name_opt = line.split_whitespace()
-            .next()
-            .and_then(|path| Path::new(path)
-                .file_name()
-                .and_then(|f| f.to_str().to_owned())
-            );
-        let Some(lib_name) = lib_name_opt else { continue };
-
-        let dpkg_output = Command::new("dpkg")
-            .arg("-S")
-            .arg(lib_name)
-            .stderr(Stdio::null())
-            .output()?;
-        let dpkg_output = if dpkg_output.status.success() {
-            String::from_utf8_lossy(&dpkg_output.stdout)
-        } else {
-            // Skip shared libraries that dpkg doesn't know about, e.g., `linux-vdso.so*`
-            continue;
-        };
-
-        let Some(package_name) = dpkg_output.split(':').next() else { continue };
-        println!("Got dpkg dependency {package_name:?} from ldd output: {line:?}");
-        dpkgs.push(package_name.to_string());
-    }
-    dpkgs.sort();
-    dpkgs.dedup();
-    println!("Sorted and de-duplicated dependencies: {:#?}", dpkgs);
-    std::fs::write("./dist/depends_deb.txt", dpkgs.join("\n"))?;
+    println!("Final .deb Depends: {}", depends.join(", "));
+    std::fs::write("./dist/depends_deb.txt", depends.join("\n"))?;
     
     strip_unneeded_linux_binaries(host_os, path_to_binary)?;
     Ok(())
+}
+
+
+/// Computes `.deb` runtime dependencies with `dpkg-shlibdeps`, the canonical
+/// Debian tool: version-pinned (e.g. `libc6 (>= 2.34)`), direct, symbol-accurate.
+fn compute_deb_depends_shlibdeps(package_name: &str, binary: &Path) -> std::io::Result<Vec<String>> {
+    // dpkg-shlibdeps reads a `debian/` dir from its cwd; hand it a throwaway one,
+    // and `-O` so it prints `shlibs:Depends=...` to stdout instead of a substvars file.
+    let binary = fs::canonicalize(binary)?;
+    let workdir = std::env::temp_dir().join(format!("rpc-shlibdeps-{}", std::process::id()));
+    fs::create_dir_all(workdir.join("debian"))?;
+    fs::write(
+        workdir.join("debian").join("control"),
+        format!("Source: {package_name}\n\nPackage: {package_name}\nArchitecture: any\n"),
+    )?;
+
+    let result = Command::new("dpkg-shlibdeps")
+        .current_dir(&workdir)
+        .args(["-O", "--ignore-missing-info"])
+        .arg(&binary)
+        .output();
+    let _ = fs::remove_dir_all(&workdir);
+    let output = result.map_err(|e| if e.kind() == std::io::ErrorKind::NotFound {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "dpkg-shlibdeps not found; install it with 'sudo apt-get install dpkg-dev'",
+        )
+    } else {
+        e
+    })?;
+
+    if !output.status.success() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!(
+                "dpkg-shlibdeps exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim(),
+            ),
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Some(list) = stdout.lines().find_map(|l| l.strip_prefix("shlibs:Depends=")) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "dpkg-shlibdeps produced no 'shlibs:Depends=' line",
+        ));
+    };
+    let depends: Vec<String> = list
+        .split(',')
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(str::to_string)
+        .collect();
+    Ok(depends)
 }
 
 

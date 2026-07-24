@@ -41,6 +41,12 @@ while `--path-to-binary` is used to locate the target directory (useful in works
 > [!IMPORTANT]
 > You *must* build in release mode (using `cargo packager --release`).
 
+> [!IMPORTANT]
+> To build a Linux `.deb` package, you need to install `dpkg-dev`:
+> ```sh
+> sudo apt-get install dpkg-dev
+> ```
+
 See the example below for an app called "Robrix" with a binary named "robrix".
 
 ```toml
@@ -69,10 +75,13 @@ robius-packaging-commands before-packaging \
 
 ## This runs once before building each separate kind of package,
 ## so it is used to build your app specifically for each package kind.
+##
+## The last line indicates that robrix also needs the `xdg-utils` package to be installed.
 before-each-package-command = """
 robius-packaging-commands before-each-package \
     --binary-name robrix \
-    --path-to-binary ./target/release/robrix
+    --path-to-binary ./target/release/robrix \
+    --add-deb-dep xdg-utils
 """
 
 ## Note: if you're using Makepad versions **BEFORE** v1.0, you only need these resources:
@@ -106,7 +115,7 @@ cargo +stable install --force --locked cargo-packager
 > [!IMPORTANT]
 > For Makepad apps using Makepad versions *before* v1.0, install `robius-packaging-commands` `--version 0.1`.
 >
-> For Makepad apps using Makepad versions *after* v1.0, install `robius-packaging-commands` `--version ^0.2`.
+> For Makepad apps using Makepad versions *after* v1.0, install the newest version of `robius-packaging-commands`.
 
 ```sh
 # From crates.io
@@ -140,6 +149,12 @@ This program runs in two modes, one for each kind of before-packaging step in ca
     * `deb`, `appimage`, `pacman`: for Linux.
     * `nsis`: for Windows; `nsis` generates an installer `setup.exe`.
     * `wix`: (UNSUPPORTED) for Windows; generates an `.msi` installer package.
+
+> [!TIP]
+> For `.deb` packages, runtime dependencies are computed automatically with
+> `dpkg-shlibdeps`. Pass `--add-deb-dep <package>` (as many times as needed)
+> to add extra runtime deps that aren't linked libraries, e.g. a tool the app needs
+> at runtime like `xdg-utils`. This is ignored for non-`.deb` formats.
 
 This program uses the `CARGO_PACKAGER_FORMAT` environment variable to determine
 which specific build commands and configuration options should be used.
