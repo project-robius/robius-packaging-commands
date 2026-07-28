@@ -631,13 +631,25 @@ fn auto_runtime_deb_deps(
         // is what's present on end-user systems, and the bare one is owned by -dev packages.
         sonames.sort();
         let soname = sonames.iter().rfind(|s| !s.ends_with(".so")).unwrap_or(&sonames[0]);
+        // Not installed here, so `dpkg -S` can't name it. Ask apt-file, which searches the
+        // archive's file lists rather than this filesystem. A bare CI runner won't have the
+        // GPU/desktop libs a dev box does, and quietly dropping one ships a .deb that
+        // installs and then won't start, so this is an error if nothing can resolve it.
         let Some(path) = lib_paths.get(soname.as_str()) else {
-            eprintln!(
-                "Warning: dlopen candidate {soname} is not installed on this build host, \
-                so its Debian package cannot be determined. \
-                If the app requires it at runtime, add it manually via --add-deb-dep."
-            );
-            continue;
+            if let Some(pkg) = apt_file_owning_package(soname) {
+                println!("Auto-detected dlopen'd library dependency: {soname} -> {pkg} (via apt-file)");
+                deps.push(pkg);
+                continue;
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "The app dlopens {soname}, but it isn't installed here and apt-file \
+                    couldn't name its package, so the .deb would silently omit it and then \
+                    fail to start. Install it on the build host (or `apt-get install \
+                    apt-file && apt-file update`), or pass its package via --add-deb-dep.",
+                ),
+            ));
         };
         match dpkg_owning_package(path) {
             Some(pkg) => {
@@ -982,6 +994,47 @@ fn ldconfig_lib_paths() -> std::io::Result<BTreeMap<String, PathBuf>> {
         map.entry(soname.to_string()).or_insert_with(|| PathBuf::from(path.trim()));
     }
     Ok(map)
+}
+
+
+/// Package name endings that ship a soname without being the runtime package for it.
+const NON_RUNTIME_PKG_SUFFIXES: &[&str] =
+    &["-dev", "-dbg", "-dbgsym", "-doc", "-test", "-tests", "-udeb"];
+
+/// Asks `apt-file` which package ships a soname, for libs that aren't installed here.
+/// Returns `None` if apt-file is missing or its index hasn't been updated.
+fn apt_file_owning_package(soname: &str) -> Option<String> {
+    let output = Command::new("apt-file")
+        .args(["search", "--package-only"])
+        // Anchor on a path separator so `libEGL.so.1` can't match `libMyEGL.so.1`.
+        .arg(format!("/{soname}"))
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    // A soname usually turns up in more than one package: `libdbus-1.so.3` matches both
+    // `libdbus-1-3` and `dbus-tests`, so the first hit is not necessarily the right one.
+    let mut candidates: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter(|p| !NON_RUNTIME_PKG_SUFFIXES.iter().any(|s| p.ends_with(s)))
+        .collect();
+    // Runtime library packages are named `lib*` by convention, which rules out the
+    // stragglers (`dbus-tests`) that the suffix list doesn't catch.
+    if candidates.iter().any(|p| p.starts_with("lib")) {
+        candidates.retain(|p| p.starts_with("lib"));
+    }
+    if candidates.len() > 1 {
+        eprintln!(
+            "Note: {soname} is shipped by several packages ({}); picking {}.",
+            candidates.join(", "),
+            candidates[0],
+        );
+    }
+    candidates.first().map(|s| s.to_string())
 }
 
 
