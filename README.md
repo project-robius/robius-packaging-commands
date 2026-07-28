@@ -75,13 +75,10 @@ robius-packaging-commands before-packaging \
 
 ## This runs once before building each separate kind of package,
 ## so it is used to build your app specifically for each package kind.
-##
-## The last line indicates that robrix also needs the `xdg-utils` package to be installed.
 before-each-package-command = """
 robius-packaging-commands before-each-package \
     --binary-name robrix \
-    --path-to-binary ./target/release/robrix \
-    --add-deb-dep xdg-utils
+    --path-to-binary ./target/release/robrix
 """
 
 ## Note: if you're using Makepad versions **BEFORE** v1.0, you only need these resources:
@@ -151,10 +148,40 @@ This program runs in two modes, one for each kind of before-packaging step in ca
     * `wix`: (UNSUPPORTED) for Windows; generates an `.msi` installer package.
 
 > [!TIP]
-> For `.deb` packages, runtime dependencies are computed automatically with
-> `dpkg-shlibdeps`. Pass `--add-deb-dep <package>` (as many times as needed)
-> to add extra runtime deps that aren't linked libraries, e.g. a tool the app needs
-> at runtime like `xdg-utils`. This is ignored for non-`.deb` formats.
+> For `.deb` packages, runtime dependencies are computed automatically:
+> * `dpkg-shlibdeps` handles every dynamically-linked lib, version-pinned.
+> * The binary is scanned for what the linker can't see: dlopen'd libs (e.g. Makepad's
+>   `libEGL.so.1`), TLS (`ca-certificates`), and `xdg-open` (`xdg-utils`). A soname only
+>   counts if an instruction actually references it, so a lib merely named in an error
+>   message doesn't become a dep.
+> * `desktop-file-utils` and `hicolor-icon-theme` are always added; their dpkg triggers
+>   are what register the `.desktop` file (deep links included) and the app icons.
+>
+> Makepad apps also skip the libs Makepad dlopens but runs fine without (its GStreamer
+> video stack). Other apps don't inherit that, since skipping a lib an app really needs
+> would ship a broken `.deb`.
+>
+> To fix anything missed: `--add-deb-dep <package>` adds a dep, and
+> `--optional-deb-dep-prefix <stem>` marks a dlopen'd lib as optional so it's skipped.
+> Both are repeatable, and ignored for non-`.deb` formats.
+
+> [!TIP]
+> `verify-deb` checks that a built `.deb` really declares what it uses:
+> ```sh
+> robius-packaging-commands verify-deb --deb ./dist/myapp_1.0.0_amd64.deb
+> ```
+> It installs the package into a minimal container with only its `Depends` (which also
+> proves it's installable), boots the app under `strace`, and fails if anything the app
+> loads or spawns isn't covered. On failure it prints the missing packages and the exact
+> command to add them. Worth running in CI: scanning a binary can't prove a dlopen'd lib
+> or spawned program was found.
+>
+> `--host` skips the container (quicker, weaker), `--image <distro:version>` picks the
+> test distro, `--run-secs <n>` sets how long the app runs (default 10), and
+> `--binary-name <name>` picks the binary if the `.deb` ships several.
+>
+> Note it only sees code paths a short boot exercises, so a pass means the
+> startup-critical deps are there, not that the list is provably complete.
 
 This program uses the `CARGO_PACKAGER_FORMAT` environment variable to determine
 which specific build commands and configuration options should be used.
