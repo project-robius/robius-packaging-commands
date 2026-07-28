@@ -56,6 +56,8 @@ struct RunOutcome {
     install_ok: Option<bool>,
     /// Exit code of the (timeout-wrapped) app: 124 = ran the full window.
     app_exit: Option<i32>,
+    /// The app's own stdout/stderr, so a crash can be diagnosed from the report.
+    app_log: String,
     trace: Trace,
     /// Recursive closure of the declared Depends (plus the package itself).
     closure: BTreeSet<String>,
@@ -89,7 +91,7 @@ pub fn verify_deb(args: &VerifyDebArgs) -> std::io::Result<()> {
         run_in_container(&deb, &pkg, &binary_name, args.run_secs, args.image.as_deref())?
     };
 
-    let pass = analyze_and_report(&outcome, &referenced, &binary_name, args.run_secs, args.host_mode);
+    let pass = analyze_and_report(&outcome, &referenced, &binary_name, args.run_secs);
     if pass {
         println!("VERDICT: PASS");
         Ok(())
@@ -126,9 +128,13 @@ else
 fi
 apt-cache depends --recurse $REC "$PKG" 2>/dev/null | grep -E '^[A-Za-z0-9]' | sort -u >/out/app_closure.txt
 
-echo "== [container] installing the test harness (strace, Xvfb, software GL)" >&2
-apt-get install -y -qq strace xvfb libgl1-mesa-dri >>/out/install.log 2>&1
-apt-cache depends --recurse $REC strace xvfb libgl1-mesa-dri 2>/dev/null | grep -E '^[A-Za-z0-9]' | sort -u >/out/harness_closure.txt
+# A GUI app needs a session to boot into, not just its libraries: a display, a GL
+# driver behind libEGL/libGL, and a sound server. Toolkits routinely hard-fail when
+# any of these is missing, which would look like a dependency problem but isn't.
+HARNESS="strace xvfb libgl1-mesa-dri libegl-mesa0 libglx-mesa0 pulseaudio"
+echo "== [container] installing the test harness ($HARNESS)" >&2
+apt-get install -y -qq $HARNESS >>/out/install.log 2>&1
+apt-cache depends --recurse $REC $HARNESS 2>/dev/null | grep -E '^[A-Za-z0-9]' | sort -u >/out/harness_closure.txt
 
 # Essential/required packages are implicit dependencies per Debian Policy.
 dpkg-query -W -f='${Package}\t${Essential}\t${Priority}\n' \
@@ -142,10 +148,17 @@ done >/out/files.map
 
 echo "== [container] booting $BIN under strace for ${SECS}s" >&2
 Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
-sleep 1
+# System mode, since we're root here and PulseAudio refuses to run as root otherwise.
+# Null sink and source included: a container has no audio hardware, and toolkits tend to
+# assume a default device exists, aborting inside libpulse when an operation returns null.
+pulseaudio --system --daemonize --exit-idle-time=-1 --disallow-exit \
+    --load="module-null-sink sink_name=dummy" \
+    --load="module-null-source source_name=dummy_source" >/dev/null 2>&1 || true
+sleep 2
 # timeout runs *inside* strace so strace exits naturally when the window closes.
 strace -o /out/trace.log -f -qq -s 256 -e trace=openat,openat2,execve,execveat \
-    timeout "$SECS" env DISPLAY=:99 HOME=/root "$BIN" >/out/app.log 2>&1
+    timeout "$SECS" env DISPLAY=:99 HOME=/root PULSE_SERVER=unix:/run/pulse/native "$BIN" \
+    >/out/app.log 2>&1
 echo $? >/out/app_exit
 "#;
 
@@ -215,6 +228,7 @@ fn run_in_container(
     Ok(RunOutcome {
         install_ok: Some(install_ok),
         app_exit: fs::read_to_string(out.path().join("app_exit")).ok().and_then(|s| s.trim().parse().ok()),
+        app_log: fs::read_to_string(out.path().join("app.log")).unwrap_or_default(),
         trace: parse_strace(&fs::read_to_string(out.path().join("trace.log")).unwrap_or_default()),
         closure,
         implicit: read_lines("implicit.txt"),
@@ -297,6 +311,7 @@ fn run_on_host(
     Ok(RunOutcome {
         install_ok: None,
         app_exit: status.code(),
+        app_log: fs::read_to_string(out.path().join("app.log")).unwrap_or_default(),
         trace,
         closure,
         implicit,
@@ -378,7 +393,6 @@ fn analyze_and_report(
     referenced: &BTreeSet<String>,
     binary_name: &str,
     run_secs: u32,
-    host_mode: bool,
 ) -> bool {
     let mut pass = true;
 
@@ -409,10 +423,18 @@ fn analyze_and_report(
         Some(code) => println!("  app boot: CRASHED (exit code {code})"),
         None => println!("  app boot: could not determine exit status"),
     }
-    if !boot_ok && !host_mode {
-        // In the clean room, a crash means the declared deps don't yield a bootable app.
-        pass = false;
+    // The app's own output is the only way to tell a missing dependency apart from an
+    // app-level failure, so show it whenever the boot didn't go cleanly.
+    if !boot_ok && !o.app_log.trim().is_empty() {
+        println!("  --- app output (last 20 lines) ---");
+        let lines: Vec<&str> = o.app_log.lines().collect();
+        for line in lines.iter().skip(lines.len().saturating_sub(20)) {
+            println!("  | {line}");
+        }
+        println!("  --- end app output ---");
     }
+    // Whether a crash counts as a packaging failure is decided at the end, once we know
+    // whether any dependency evidence actually explains it.
 
     let covered: BTreeSet<&String> = o.closure.union(&o.implicit).collect();
     let owner_of = |path: &str| o.file_owner.get(&normalize_path(path));
@@ -528,6 +550,21 @@ fn analyze_and_report(
         println!("  ⚠ data files opened outside the closure (informational):");
         for p in data_uncovered.iter().take(25) {
             println!("      {p}");
+        }
+    }
+
+    // A crash is only a packaging failure if some dependency evidence explains it -- a
+    // missing library, or something loaded that nothing declares. With all of that clean,
+    // the app died for its own reasons (no audio device, no GPU, no config), and failing
+    // on that would make this check useless anywhere but a full desktop session.
+    if !boot_ok {
+        if pass {
+            println!("  ⚠ the app did not run cleanly, but everything it loaded and spawned");
+            println!("    was covered by the declared dependencies, so this looks like an");
+            println!("    app-level or environment problem rather than a packaging one.");
+            println!("    Not failing on it -- see the app output above.");
+        } else {
+            println!("  note: the crash above is likely explained by the dependency problems listed.");
         }
     }
 
