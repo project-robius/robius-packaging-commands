@@ -252,7 +252,24 @@ fn before_each_package<P: AsRef<Path>>(
         let app_resources_dest = dist_resources_dir.join(main_binary_name).join("resources");
         let app_resources_src = cwd.join("resources");
         println!("Copying app-specific resources...\n  --> From: {}\n      to:   {}", app_resources_src.display(), app_resources_dest.display());
-        copy_recursively(&app_resources_src, &app_resources_dest)?;
+        if treat_as_makepad_app() {
+            // makepad's resources/android and resources/ios are mobile-only, skip them on desktop
+            fs::create_dir_all(&app_resources_dest)?;
+            for entry in fs::read_dir(&app_resources_src)? {
+                let entry = entry?;
+                let dest = app_resources_dest.join(entry.file_name());
+                if entry.file_type()?.is_dir() {
+                    if entry.file_name() == "android" || entry.file_name() == "ios" {
+                        continue;
+                    }
+                    copy_recursively(entry.path(), dest)?;
+                } else {
+                    fs::copy(entry.path(), dest)?;
+                }
+            }
+        } else {
+            copy_recursively(&app_resources_src, &app_resources_dest)?;
+        }
     }
 
     // If this is a Makepad app, copy Makepad-specific resources
