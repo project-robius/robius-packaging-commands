@@ -64,19 +64,6 @@ const EMPTY_ARGS: std::iter::Empty<&str> = std::iter::empty::<&str>();
 const EMPTY_ENVS: std::iter::Empty<(&str, &str)> = std::iter::empty::<(&str, &str)>();
 
 
-fn resolve_target_dir(path_to_binary: &Path, cwd: &Path) -> PathBuf {
-    let abs_path = if path_to_binary.is_absolute() {
-        path_to_binary.to_path_buf()
-    } else {
-        cwd.join(path_to_binary)
-    };
-    abs_path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| cwd.to_path_buf())
-}
-
-
 fn main() -> std::io::Result<()> {
     let mut is_before_packaging = false;
     let mut is_before_each_package = false;
@@ -239,7 +226,6 @@ fn before_each_package<P: AsRef<Path>>(
     };
 
     let cwd = std::env::current_dir()?;
-    let target_dir = resolve_target_dir(path_to_binary.as_ref(), &cwd);
     let dist_resources_dir = cwd.join("dist").join("resources");
 
     // Clear/delete existing resources directory to ensure no stale files
@@ -274,7 +260,7 @@ fn before_each_package<P: AsRef<Path>>(
 
     // If this is a Makepad app, copy Makepad-specific resources
     if treat_as_makepad_app() {
-        copy_makepad_resources(&dist_resources_dir, &target_dir)?;
+        copy_makepad_resources(&dist_resources_dir)?;
     }
     println!("All resources copied successfully to: {}", dist_resources_dir.display());
     println!("  --> Done!");
