@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::{Path, PathBuf}, sync::OnceLock};
+use std::{collections::HashMap, fs, path::{Path, PathBuf}, sync::OnceLock};
 
 use cargo_metadata::MetadataCommand;
 
@@ -78,10 +78,69 @@ pub(crate) fn get_makepad_resources_paths() -> HashMap<String, PathBuf> {
 /// This uses `cargo-metadata` to determine the location of the `makepad-widgets` crate,
 /// and then copies the `resources` directory from that crate to a makepad-specific subdirectory
 /// of the given `dist_resources_dir` path, which is currently `./dist/resources/makepad_widgets/`.
-pub(crate) fn copy_makepad_resources<P>(dist_resources_dir: P) -> std::io::Result<()>
+/// The font assets an app's binary declares, read from the `makepad.font-assets.v1`
+/// section that `app_main!` embeds. `cargo-makepad` packages mobile builds from the same
+/// manifest, so desktop ships exactly the fonts the app can reach too.
+pub(crate) struct FontManifest {
+    assets: Vec<String>,
+}
+
+impl FontManifest {
+    const HEADER: &'static [u8] = b"format=makepad.font-assets.v1\n";
+
+    /// Scans the raw bytes rather than parsing ELF/Mach-O/PE, so one reader covers every
+    /// desktop target. The manifest is line-oriented, and a base manifest can also sit in
+    /// the binary as plain data, so the longest occurrence is the app's own.
+    pub(crate) fn from_binary(path: &Path) -> std::io::Result<Self> {
+        let bytes = fs::read(path)?;
+        let mut best: Option<Vec<String>> = None;
+        let mut search = 0;
+        while let Some(found) = find(&bytes[search..], Self::HEADER) {
+            let start = search + found;
+            let mut assets = Vec::new();
+            let mut cursor = start + Self::HEADER.len();
+            while let Some(newline) = find(&bytes[cursor..], b"\n") {
+                let line = &bytes[cursor..cursor + newline];
+                cursor += newline + 1;
+                if let Some(asset) = line.strip_prefix(b"asset=") {
+                    assets.push(String::from_utf8_lossy(asset).into_owned());
+                } else if !line.starts_with(b"set=") {
+                    break;
+                }
+            }
+            if best.as_ref().map_or(true, |b| assets.len() > b.len()) {
+                best = Some(assets);
+            }
+            search = start + Self::HEADER.len();
+        }
+        let assets = best.ok_or_else(|| std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no makepad.font-assets.v1 manifest found in {}", path.display()),
+        ))?;
+        Ok(Self { assets })
+    }
+
+    /// `logical_path` is the manifest's form, e.g. `makepad_widgets/resources/Foo.ttf`.
+    fn declares(&self, logical_path: &str) -> bool {
+        self.assets.iter().any(|asset| asset == logical_path)
+    }
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|window| window == needle)
+}
+
+fn is_font_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc"))
+}
+
+pub(crate) fn copy_makepad_resources<P>(dist_resources_dir: P, path_to_binary: &Path) -> std::io::Result<()>
 where
     P: AsRef<Path>
 {
+    let manifest = FontManifest::from_binary(path_to_binary)?;
     let makepad_resources_paths = get_makepad_resources_paths();
     if makepad_resources_paths.is_empty() {
         return Err(std::io::Error::new(
@@ -90,7 +149,7 @@ where
         ));
     }
     println!("Copying Makepad resources...");
-    for (resources_dir_name, resources_dir_path) in makepad_resources_paths {
+    for (resources_dir_name, resources_dir_path) in &makepad_resources_paths {
         let source_path = resources_dir_path.join("resources");
 
         let makepad_widgets_resources_dest = dist_resources_dir.as_ref()
@@ -99,8 +158,45 @@ where
 
         if source_path.exists() {
             println!("--> From: {}\n      to:   {}", source_path.display(), makepad_widgets_resources_dest.display());
-            super::copy_recursively(&source_path, &makepad_widgets_resources_dest)?;
+            let mut packaged = Vec::new();
+            let mut skipped = Vec::new();
+            copy_resources_filtered(&source_path, &makepad_widgets_resources_dest, &mut |relative| {
+                if !is_font_file(relative) {
+                    return true;
+                }
+                let logical_path = format!("{}/resources/{}", resources_dir_name, relative.display());
+                let wanted = manifest.declares(&logical_path);
+                if wanted { packaged.push(logical_path) } else { skipped.push(logical_path) }
+                wanted
+            })?;
+            println!("    Packaged fonts: {}", packaged.join(", "));
+            if !skipped.is_empty() {
+                println!("    Skipped fonts not in the app's manifest: {}", skipped.join(", "));
+            }
         }
     }
     Ok(())
+}
+
+/// Like `copy_recursively`, but `keep` sees each file's path relative to `source` and can
+/// drop it. Directories are always created so non-font resources land unchanged.
+fn copy_resources_filtered(
+    source: &Path,
+    destination: &Path,
+    keep: &mut dyn FnMut(&Path) -> bool,
+) -> std::io::Result<()> {
+    fn walk(root: &Path, dir: &Path, destination: &Path, keep: &mut dyn FnMut(&Path) -> bool) -> std::io::Result<()> {
+        fs::create_dir_all(destination)?;
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let dest = destination.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                walk(root, &entry.path(), &dest, keep)?;
+            } else if keep(entry.path().strip_prefix(root).unwrap_or(&entry.path())) {
+                fs::copy(entry.path(), dest)?;
+            }
+        }
+        Ok(())
+    }
+    walk(source, source, destination, keep)
 }

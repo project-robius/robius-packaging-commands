@@ -260,7 +260,7 @@ fn before_each_package<P: AsRef<Path>>(
 
     // If this is a Makepad app, copy Makepad-specific resources
     if treat_as_makepad_app() {
-        copy_makepad_resources(&dist_resources_dir)?;
+        copy_makepad_resources(&dist_resources_dir, path_to_binary.as_ref())?;
     }
     println!("All resources copied successfully to: {}", dist_resources_dir.display());
     println!("  --> Done!");
