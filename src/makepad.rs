@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, path::{Path, PathBuf}, sync::OnceLock};
+use std::{collections::HashMap, path::{Path, PathBuf}, sync::OnceLock};
 
 use cargo_metadata::MetadataCommand;
 
@@ -49,29 +49,26 @@ pub(crate) fn is_makepad_app() -> bool {
     })
 }
 
-pub(crate) fn get_makepad_resources_paths(target_dir: &Path) -> HashMap<String, PathBuf> {
-    let paths_dir = target_dir.to_path_buf();
-    fs::read_dir(&paths_dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-
-            if !path.is_file() {
+/// Every makepad crate that ships a `resources` directory, keyed by the
+/// `makepad_<crate>` name its resources get packaged under.
+///
+/// This used to read the `<crate>.path` files that makepad's build scripts leave in the target
+/// dir, but those are a build-script side effect: anything that prunes the target dir deletes
+/// them, and a warm build cache means the build script never re-runs to write them again.
+pub(crate) fn get_makepad_resources_paths() -> HashMap<String, PathBuf> {
+    let Ok(metadata) = MetadataCommand::new().exec() else {
+        return HashMap::new();
+    };
+    metadata
+        .packages
+        .iter()
+        .filter(|package| package.name.starts_with("makepad-"))
+        .filter_map(|package| {
+            let crate_dir = package.manifest_path.parent()?.to_owned().into_std_path_buf();
+            if !crate_dir.join("resources").is_dir() {
                 return None;
             }
-
-            let filename = path.file_name()?.to_str()?;
-
-            let package_name = filename
-                .strip_prefix("makepad-")?
-                .strip_suffix(".path")?;
-
-            let content = fs::read_to_string(&path).ok()?;
-            let resources_dir_path = PathBuf::from(content.trim());
-            let resources_dir_name = format!("makepad_{}", package_name.replace('-', "_"));
-            Some((resources_dir_name, resources_dir_path))
+            Some((package.name.replace('-', "_"), crate_dir))
         })
         .collect()
 }
@@ -81,16 +78,15 @@ pub(crate) fn get_makepad_resources_paths(target_dir: &Path) -> HashMap<String, 
 /// This uses `cargo-metadata` to determine the location of the `makepad-widgets` crate,
 /// and then copies the `resources` directory from that crate to a makepad-specific subdirectory
 /// of the given `dist_resources_dir` path, which is currently `./dist/resources/makepad_widgets/`.
-pub(crate) fn copy_makepad_resources<P>(dist_resources_dir: P, target_dir: &Path) -> std::io::Result<()>
+pub(crate) fn copy_makepad_resources<P>(dist_resources_dir: P) -> std::io::Result<()>
 where
     P: AsRef<Path>
 {
-    let makepad_resources_paths = get_makepad_resources_paths(target_dir);
+    let makepad_resources_paths = get_makepad_resources_paths();
     if makepad_resources_paths.is_empty() {
-        // This situation can happen if the user use local Makepad repository and deletes the all `makepad-*.path` files.
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!("Missing resource paths: no `.path` files found in the Makepad build directory ({})", target_dir.display()),
+            "Missing resource paths: cargo metadata reported no makepad crate with a `resources` directory".to_string(),
         ));
     }
     println!("Copying Makepad resources...");
