@@ -91,7 +91,10 @@ impl FontManifest {
     /// Scans the raw bytes rather than parsing ELF/Mach-O/PE, so one reader covers every
     /// desktop target. The manifest is line-oriented, and a base manifest can also sit in
     /// the binary as plain data, so the longest occurrence is the app's own.
-    pub(crate) fn from_binary(path: &Path) -> std::io::Result<Self> {
+    ///
+    /// `Ok(None)` means the binary has no manifest at all, which is what a makepad from
+    /// before `app_main!` started embedding one produces. Those builds get every font.
+    pub(crate) fn from_binary(path: &Path) -> std::io::Result<Option<Self>> {
         let bytes = fs::read(path)?;
         let mut best: Option<Vec<String>> = None;
         let mut search = 0;
@@ -113,11 +116,7 @@ impl FontManifest {
             }
             search = start + Self::HEADER.len();
         }
-        let assets = best.ok_or_else(|| std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("no makepad.font-assets.v1 manifest found in {}", path.display()),
-        ))?;
-        Ok(Self { assets })
+        Ok(best.map(|assets| Self { assets }))
     }
 
     /// `logical_path` is the manifest's form, e.g. `makepad_widgets/resources/Foo.ttf`.
@@ -141,6 +140,10 @@ where
     P: AsRef<Path>
 {
     let manifest = FontManifest::from_binary(path_to_binary)?;
+    if manifest.is_none() {
+        println!("No font manifest in {}; this makepad predates them, so every font is packaged.",
+            path_to_binary.display());
+    }
     let makepad_resources_paths = get_makepad_resources_paths();
     if makepad_resources_paths.is_empty() {
         return Err(std::io::Error::new(
@@ -165,7 +168,7 @@ where
                     return true;
                 }
                 let logical_path = format!("{}/resources/{}", resources_dir_name, relative.display());
-                let wanted = manifest.declares(&logical_path);
+                let wanted = manifest.as_ref().is_none_or(|m| m.declares(&logical_path));
                 if wanted { packaged.push(logical_path) } else { skipped.push(logical_path) }
                 wanted
             })?;
