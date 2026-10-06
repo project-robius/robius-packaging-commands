@@ -95,7 +95,11 @@ impl FontManifest {
     /// `Ok(None)` means the binary has no manifest at all, which is what a makepad from
     /// before `app_main!` started embedding one produces. Those builds get every font.
     pub(crate) fn from_binary(path: &Path) -> std::io::Result<Option<Self>> {
-        let bytes = fs::read(path)?;
+        let bytes = fs::read(path)
+            .map_err(|e| std::io::Error::new(
+                e.kind(),
+                format!("Failed to read the app binary at {} to find its font manifest: {e}", path.display()),
+            ))?;
         let mut best: Option<Vec<String>> = None;
         let mut search = 0;
         while let Some(found) = find(&bytes[search..], Self::HEADER) {
@@ -127,6 +131,18 @@ impl FontManifest {
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|window| window == needle)
+}
+
+/// Returns the manifest's `/`-separated name for the font at `relative`
+/// within a crate's `resources` directory.
+fn font_logical_path(resources_dir_name: &str, relative: &Path) -> String {
+    // `Path::display()` would use `\` on Windows, so the components are joined by hand.
+    let relative = relative
+        .iter()
+        .map(|part| part.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("{resources_dir_name}/resources/{relative}")
 }
 
 fn is_font_file(path: &Path) -> bool {
@@ -167,7 +183,7 @@ where
                 if !is_font_file(relative) {
                     return true;
                 }
-                let logical_path = format!("{}/resources/{}", resources_dir_name, relative.display());
+                let logical_path = font_logical_path(resources_dir_name, relative);
                 let wanted = manifest.as_ref().is_none_or(|m| m.declares(&logical_path));
                 if wanted { packaged.push(logical_path) } else { skipped.push(logical_path) }
                 wanted
@@ -202,4 +218,21 @@ fn copy_resources_filtered(
         Ok(())
     }
     walk(source, source, destination, keep)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn font_logical_path_uses_forward_slashes() {
+        assert_eq!(
+            font_logical_path("makepad_widgets", Path::new("Foo.ttf")),
+            "makepad_widgets/resources/Foo.ttf",
+        );
+        assert_eq!(
+            font_logical_path("makepad_widgets", &Path::new("fonts").join("cjk").join("Foo.ttf")),
+            "makepad_widgets/resources/fonts/cjk/Foo.ttf",
+        );
+    }
 }
