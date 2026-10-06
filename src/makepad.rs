@@ -95,7 +95,11 @@ impl FontManifest {
     /// `Ok(None)` means the binary has no manifest at all, which is what a makepad from
     /// before `app_main!` started embedding one produces. Those builds get every font.
     pub(crate) fn from_binary(path: &Path) -> std::io::Result<Option<Self>> {
-        let bytes = fs::read(path)?;
+        let bytes = fs::read(path)
+            .map_err(|e| std::io::Error::new(
+                e.kind(),
+                format!("Failed to read the app binary at {} to find its font manifest: {e}", path.display()),
+            ))?;
         let mut best: Option<Vec<String>> = None;
         let mut search = 0;
         while let Some(found) = find(&bytes[search..], Self::HEADER) {
